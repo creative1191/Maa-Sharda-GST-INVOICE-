@@ -1,0 +1,9 @@
+{
+  "_help": "Template — apne fixed client ki details copy karke clients/default.json me bharo. Sirf client_name zaroori hai, baaki optional.",
+  "client_name": "Sharma Trading Co.",
+  "client_address1": "42, Civil Lines, Near Sector 14 Market",
+  "client_address2": "Gurugram, Haryana - 122001",
+  "client_gstin": "06ABCDE1234F1Z5",
+  "client_state": "Haryana",
+  "origin_pincode": "485446"
+}

@@ -1,0 +1,431 @@
+================================================================================
+  MASTER INSTRUCTION FILE — B2B GST TAX INVOICE SYSTEM
+  Maa Sharda Enterprises (Logistics Intermediary) — Courier & Logistics
+================================================================================
+  PURPOSE: Paste this entire file into a fresh AI chat to give it 100%
+  context. Contains complete business model, legal constraints, approved
+  UI layout (pixel-level), technical architecture, known bugs (already
+  fixed — do not repeat), and the verification protocol for the
+  Python/ReportLab invoice generator.
+================================================================================
+
+
+================================================================================
+SECTION 1: BUSINESS CONTEXT
+================================================================================
+
+1.1 THE FIRM
+------------
+  Firm Name        : Maa Sharda Enterprises
+  Role             : Logistics intermediary (freight forwarder / reseller of
+                     shipping services)
+  Routing Partner  : Delhivery (third-party courier used for physical delivery)
+  Supplier GSTIN   : 23BCPPD5853C1ZT  (state code 23 = Madhya Pradesh)
+  Registered Address (as per GST certificate — DO NOT change):
+      Line 1 : Near Rest House, Panna Satna Road
+      Line 2 : Nagod, Distt. Satna, Madhya Pradesh - 485446
+      (Field-for-field from the certificate: Building=Near Rest House,
+       Road=Panna Satna Road, Landmark/City=Nagod, District=Satna,
+       State=Madhya Pradesh, PIN=485446)
+
+1.2 THE "PASS-THROUGH" COD MODEL (CRITICAL TO UNDERSTAND)
+---------------------------------------------------------
+  1. A BUSINESS CLIENT (the B2B customer, e.g. an e-commerce seller) sells
+     physical products to end-customers (often COD — Cash On Delivery).
+  2. The client hands shipments to Maa Sharda Enterprises, which books them
+     on DELHIVERY. Delhivery's own invoice/PDF shows the PRODUCT VALUE
+     (e.g. CLOTHS x 1 @ INR 2000) and end-customer details.
+  3. Maa Sharda Enterprises bills ONLY the Client — and ONLY for the
+     SHIPPING SERVICE (freight) + GST. The product's value and the COD
+     amount belong to the Client's transaction with its end-customer —
+     they are PASS-THROUGH and must NEVER appear on our invoice.
+
+1.3 CORE OBJECTIVE OF THE SYSTEM
+--------------------------------
+  Generate a legally compliant B2B "TAX INVOICE" (PDF + HTML) from:
+    - Client details (name, address, GSTIN)
+    - Base shipping charge (taxable value, Rs)
+    - Shipment metadata (AWB, consignee name, client order ID, pincodes,
+      weight)
+  The system computes GST automatically, formats the number to words, and
+  emits a pixel-perfect US Letter PDF.
+
+1.4 ECOSYSTEM NOTE (RECEIPT TOOL REMOVED)
+--------------------------------------------------------------
+  An older "Customer Receipt Tool" (receipt_tool.py, invoice_engine.py,
+  generate_invoice.py, tests, run.bat, build_exe.py, GitHub workflow,
+  old spec docs) coexisted with this system but was DELETED on user
+  request after the GST-only workflow was confirmed. Only its generated
+  business records remain in generated/ (receipt_*.pdf/html). Shared
+  modules it used — pdf_parser.py and embedded_assets.py — are still
+  live dependencies of the GST system. Do not recreate the receipt tool
+  unless the user asks.
+
+
+================================================================================
+SECTION 2: STRICT GST COMPLIANCE RULES (ZERO EXCEPTIONS)
+================================================================================
+
+RULE G1 — ABSOLUTE EXCLUSION LIST (NEVER PRINT THESE ANYWHERE)
+--------------------------------------------------------------
+  [X] Product Name / Item Description (e.g. "CLOTHS")
+  [X] Product Value / Declared Value (e.g. INR 2000)
+  [X] COD Amount (total cash collected from end-customer)
+  [X] Quantity / Qty column
+  REASON: The invoice bills a SERVICE (freight), not goods. Product/COD
+  data belongs to the Client<->End-Customer relationship. Mentioning goods
+  on a service invoice misrepresents the supply and breaks GST compliance.
+
+RULE G2 — SERVICE IDENTIFICATION (MANDATORY ON EVERY INVOICE)
+-------------------------------------------------------------
+  Service Description (static) : "Courier & Logistics Services"
+  SAC Code (static)            : 9968
+    * Must be permanently visible, RIGHT-ALIGNED on the SAME horizontal
+      row as Service Description (see Section 3.3).
+
+RULE G3 — GST CALCULATION LOGIC (18% ON BASE FREIGHT)
+-----------------------------------------------------
+  Let base = Base Shipping Charge (Taxable Value), rounded 2dp half-up.
+  Determine client state code from the FIRST 2 DIGITS OF THE CLIENT'S
+  GSTIN (fallback: client_state name lookup).
+
+  IF client state code == 23 (MP, same as supplier) -> INTRA-STATE:
+      Print TWO rows: "Add: CGST @ 9%" AND "Add: SGST @ 9%"
+      cgst = sgst = round(base x 0.09)
+
+  IF client state code != 23 (or unknown/other) -> INTER-STATE:
+      Print ONE row: "Add: IGST @ 18%"
+      igst = round(base x 0.18)
+
+  Total Invoice Amount = base + cgst + sgst + igst  (never anything else)
+  Amount in Words (Indian numbering: Crore/Lakh/Thousand) must follow the
+  total, e.g. "One Thousand One Hundred Eighty Rupees Only".
+
+RULE G4 — PARTY DETAILS
+-----------------------
+  * Supplier block = HARDCODED (name/address/GSTIN from Section 1.1).
+    Never extract supplier details from any PDF.
+  * Billed To block = the BUSINESS CLIENT (dynamic: name, address, GSTIN,
+    state).
+  * The CONSIGNEE (end-customer name) must NEVER appear in the BILLED TO
+    block. It appears only inside the Service & Shipment Details box as
+    reconciliation data.
+
+RULE G5 — DOCUMENT IDENTIFICATION
+---------------------------------
+  Title         : "TAX INVOICE"
+  Invoice Number: SEQUENTIAL, FY-aware — format MSE/<FY>/####
+                  e.g. MSE/2026-27/0001. Indian fiscal year runs
+                  APRIL->MARCH (a date in Feb 2027 belongs to FY 2026-27).
+                  Counter persisted in a text file
+                  (generated/gst_invoice_counter.txt, lines "FY: count").
+  Invoice Date  : YYYY-MM-DD only — TIME IS NEVER PRINTED (existing
+                  clean_date_string() helper strips it).
+
+RULE G6 — GSTIN VALIDATION (WARN, DON'T BLOCK)
+----------------------------------------------
+  Regex : ^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$
+  CLI prints warnings for missing/invalid client GSTIN or placeholder
+  supplier GSTIN. B2B invoices should carry the client's GSTIN (needed
+  for ITC).
+
+
+================================================================================
+SECTION 3: UI & LAYOUT BLUEPRINT (APPROVED, PIXEL-LEVEL)
+================================================================================
+
+3.0 PAGE & STYLE CONSTANTS
+--------------------------
+  Page    : US Letter (612x792pt), margins 36pt all sides
+            -> content width 540pt
+  Font    : Helvetica / Helvetica-Bold
+  Palette (exact):
+    Header/title #0f172a | body #1e293b | muted #64748b | semi #475569
+    Border #cbd5e1 | light border #e2e8f0 | light bg #f8fafc | red #d9534f
+  Styles : firm name 20pt bold; "TAX INVOICE" 15pt bold; section headers
+    10.5pt bold; body 10pt; small 9pt; financial labels 10.5pt (total row
+    11.5pt); words italic 9.5pt; declaration 8.5pt; footer 8pt centered.
+
+3.1 HEADER (TOP OF PAGE)
+------------------------
+  +--------------------------------------------------------------+
+  | Maa Sharda Enterprises (20pt, LEFT)     TAX INVOICE (RIGHT)  |
+  | Near Rest House, Panna Satna Rd, Nagod   Invoice No: MSE/..  |
+  | Distt. Satna, MP - 485446                Date: 2026-09-01    |
+  | GSTIN: 23BCPPD5853C1ZT | State: MP (23)                      |
+  +--------------------------------------------------------------+
+  -> then 1.5pt horizontal rule #cbd5e1
+
+  BRANDING RULE: Only "Maa Sharda Enterprises" branding here.
+  THE DELHIVERY LOGO IS STRICTLY FORBIDDEN IN THE HEADER. It appears
+  exactly ONCE in the whole document: small icon in the Service &
+  Shipment box (3.3).
+  Table: colWidths=[360, 180], VALIGN TOP, all paddings 0.
+
+3.2 BILLED TO (SINGLE BLOCK — NO FROM BLOCK)
+----------------------------------------------
+  BILLED TO (CLIENT)
+  <client_name> (bold)
+  <client_address1>
+  <client_address2>
+  GSTIN: <client_gstin or —>
+  State: <resolved from GSTIN> (code)
+
+  * Supplier details live ONLY in the header (3.1) — a separate
+    "FROM (SUPPLIER)" block was removed on user request.
+    colWidths=[540].
+  * Supplier data is generated from constants — never from parsed data.
+
+3.3 SERVICE & SHIPMENT DETAILS BOX  <<< MOST ITERATION-SENSITIVE AREA >>>
+------------------------------------------------------------------------
+  Outer box: full width 540, bg #f8fafc, border 0.5pt #e2e8f0,
+  padding 15 L/R + 12 T/B  ->  inner usable width = 540 - 30 = 510pt.
+  Inner table colWidths=[310, 200]  (SUM MUST BE 510!)
+
+  ROW ORDER (EXACT):
+  Row 0: SERVICE & SHIPMENT DETAILS (section header, SPAN both columns)
+  Row 1: AWB No / Tracking ID: <awb>
+         [RIGHT: Delhivery icon 52x9 + "Routing Partner: Delhivery"]
+  Row 2: Consignee / Delivered To: <name>     Client Order ID: <id>
+         (Delhivery PDF se generate karte waqt Client Order ID PDF ke
+          "Sales Number" se AUTO-FILL hota hai — flag/manual override karta hai)
+  Row 3: Service Description: Courier & Logistics Services
+         [RIGHT-ALIGNED, SAME ROW: SAC Code: 9968]
+  Row 4: [Origin Pincode | Destination Pincode | Weight]
+         (3-col specs sub-table, SPAN both columns)
+
+  * Row 3 mandatory appearance: label left-flush at box inner-left edge
+    (x ~ 51), "SAC Code: 9968" right-flush at box inner-right edge
+    (x1 ~ 561) — same baseline.
+  * Specs sub-table: 3 equal columns (~166pt), header labels bold + bold
+    values, thin top rule #e2e8f0.
+  * Empty optional values render as "—" (em dash), never blank or "None".
+
+3.4 FINANCIAL TABLE (BASE + GST = TOTAL)
+----------------------------------------
+  +------------------------------------------------------------+
+  | Base Shipping Charge (Taxable Value)            INR 1,000.00 |
+  | Add: IGST @ 18%   (OR  Add: CGST @ 9% + Add: SGST @ 9%)      |
+  |------------------------------------------------------------|
+  | Total Invoice Amount (bold, bg #f8fafc,         INR 1,180.00 |
+  |  1pt top border #0f172a)                                    |
+  | Amount in Words: One Thousand One Hundred Eighty Rupees Only |
+  +------------------------------------------------------------+
+
+  * colWidths=[360, 180]; value column right-aligned; padding 12 L/R, 8 T/B
+  * Amount-in-words row spans both columns, italic.
+  * Amounts formatted "INR 1,234.56" (comma thousands, 2 decimals).
+
+3.5 FOOTER AREA
+---------------
+  * Declaration (left, 8.5pt muted): "We declare that this invoice shows
+    the actual price of the service described... computer-generated...
+    no physical signature."
+  * Signature block (right): "For Maa Sharda Enterprises" (bold) + gap +
+    "Authorised Signatory"
+  * Thin 0.5pt rule + centered footer: "This is a computer-generated tax
+    invoice for courier & logistics services. | Routing Partner: Delhivery"
+
+3.6 HTML TWIN
+-------------
+  Every PDF change must be mirrored in generate_gst_html() (standalone
+  HTML, inline CSS, base64 Delhivery icon, print button + @media print
+  rules). Structure maps 1:1 to the PDF sections above.
+
+
+================================================================================
+SECTION 4: TECHNICAL WORKFLOW (PYTHON / REPORTLAB)
+================================================================================
+
+4.1 FILE MAP (PROJECT: Receipt_tool/)
+-------------------------------------
+  src/gst_invoice_engine.py    <- engine: constants, styles, calc_gst
+                                  (+reverse), words, numbering,
+                                  normalize_gst_data, build_gst_story,
+                                  generate_gst_pdf / generate_gst_html /
+                                  generate_gst_invoice
+  src/generate_gst_invoice.py  <- CLI: flags + client profile + --doc
+                                  extraction, auto invoice no., prints
+                                  GST breakdown
+  src/doc_extractor.py         <- OCR/document extraction (image/PDF ->
+                                  AWB, consignee, destination pincode;
+                                  label-aware regexes + preprocessing)
+  src/pdf_parser.py            <- Delhivery invoice parser (shared:
+                                  also provides clean_date_string +
+                                  deduplicate_line)
+  src/embedded_assets.py       <- Delhivery logo as base64
+                                  (get_logo_stream())
+  clients/default.json         <- FIXED client profile (auto Billed-To)
+  clients/example.json         <- profile format sample
+  generated/                   <- outputs: GST_invoice_<AWB>.pdf/.html +
+                                  gst_invoice_counter.txt (sequence state)
+
+4.2 INPUT DATA CONTRACT (DICT PASSED TO generate_gst_invoice)
+-------------------------------------------------------------
+  {
+    "invoice_num": "",              # empty -> auto MSE/FY/NNNN
+    "invoice_date": "2026-09-01",   # YYYY-MM-DD, time stripped
+    "client_name": "Sharma Trading Co.",
+    "client_address1": "42, Civil Lines",
+    "client_address2": "Gurugram, Haryana - 122001",
+    "client_gstin": "06ABCDE1234F1Z5",  # first 2 digits decide CGST/SGST vs IGST
+    "client_state": "",             # optional fallback for state detection
+    "base_charge": 1000.0,          # taxable value
+    "awb": "34084710004266",
+    "consignee_name": "Kajal Singh Chandel",  # end-customer (recon only!)
+    "client_order_id": "ORD-88123",
+    "origin_pincode": "485446",
+    "destination_pincode": "122001",
+    "weight": "0.5 kg",
+  }
+
+4.3 KEY IMPLEMENTATION NOTES (REPORTLAB SPECIFICS)
+--------------------------------------------------
+  * SimpleDocTemplate(path, pagesize=letter, margins=36), platypus story.
+  * Right alignment: ParagraphStyle(..., alignment=2) and/or TableStyle
+    ("ALIGN", (col,row), (col,row), "RIGHT").
+  * !!! SPAN TRAP (CAUSED A REAL BUG) !!!
+    ("SPAN", (0,r),(1,r)) indexes are ROW-POSITIONAL. Adding a row shifts
+    every later row — every SPAN/ALIGN/padding directive must be
+    re-indexed. Approved final indexes for the svc table:
+    SPAN rows 0 and 4; ALIGN RIGHT at (1,1) and (1,3).
+  * !!! WIDTH TRAP (CAUSED A REAL BUG) !!!
+    A nested table inside a padded box must use
+    (box_width - horizontal_padding) = 540 - 30 = 510. Oversized inner
+    tables silently overflow the box border (~15pt past it).
+  * Money rounding: Decimal.quantize(0.01, ROUND_HALF_UP) — never float
+    math.
+  * Sequential numbering writes back to the counter file — reset
+    generated/gst_invoice_counter.txt to restart a FY sequence (e.g.
+    after tests).
+
+4.4 CLI USAGE
+-------------
+  python src/generate_gst_invoice.py \
+    --client_name "Sharma Trading Co." \
+    --client_address1 "42, Civil Lines" \
+    --client_address2 "Gurugram, Haryana - 122001" \
+    --client_gstin "06ABCDE1234F1Z5" \
+    --base_charge 1000 \
+    --awb "34084710004266" \
+    --consignee "Kajal Singh Chandel" \
+    --client_order_id "ORD-88123" \
+    --origin_pincode 485446 --destination_pincode 122001 \
+    --weight "0.5 kg" \
+    --out generated/GST_invoice.pdf
+
+4.5 MANDATORY VERIFICATION PROTOCOL (RUN AFTER ANY LAYOUT CHANGE)
+-----------------------------------------------------------------
+  Using pdfplumber on the output PDF:
+  1. FORBIDDEN-WORD SCAN (G1): none of "Item Description, Qty, Quantity,
+     COD, CLOTH, Product" may appear in extracted text.
+  2. SAC ROW GEOMETRY: "Service" and "SAC" words share the same top
+     (+/-2pt); "9968" ends at x1 ~ 561 (box inner-right); Service label
+     starts x ~ 51.
+  3. OVERFLOW SCAN: no word on the page may have x1 > 577 (right margin).
+  4. ORDER OF ROWS: AWB < Consignee/OrderID < Service/SAC < Pincodes.
+  5. BILLED TO ISOLATION: consignee name must NOT appear between the
+     "BILLED TO" and "SERVICE &" text anchors.
+  6. TAX MATH: same-state -> CGST & SGST rows present, IGST absent (and
+     vice versa); Total = base + taxes; words string present.
+  7. Single page, size 612x792, exactly ONE image (small Delhivery icon).
+
+4.6 KNOWN BUGS ALREADY FIXED — NEVER REINTRODUCE
+------------------------------------------------
+  BUG: SAC Code invisible
+      Root cause : New Consignee row shifted rows; stale SPAN (0,3)
+                   swallowed the Service/SAC row
+      Fix        : Re-index SPAN to row 4; keep SAC in row 3
+
+  BUG: Content crossing box border
+      Root cause : Inner table 540pt inside 510pt space
+      Fix        : Inner colWidths=[310,200]
+
+  BUG: SAC not right-aligned
+      Root cause : style used left-aligned s_body
+      Fix        : s_right (alignment=2) + cell ALIGN
+
+  BUG: Time leaking into dates
+      Root cause : raw Delhivery dates
+      Fix        : clean_date_string() everywhere
+
+4.7 CHANGE REQUEST CHECKLIST (FOR FUTURE EDITS)
+-----------------------------------------------
+  1. Update normalize_gst_data() (new keys) -> build_gst_story() -> HTML
+     twin.
+  2. Re-check every SPAN/ALIGN index against the new row order.
+  3. Regenerate BOTH test cases (inter-state IGST + intra-state CGST/SGST).
+  4. Run the full Section 4.5 verification protocol.
+  5. Never touch: supplier constants, GST math, exclusion list (G1),
+     financial layout — unless the user explicitly requests a compliance
+     change.
+
+
+================================================================================
+APPENDIX A: APPROVED END-TO-END SAMPLES
+================================================================================
+  INTER-STATE (IGST):
+      Client "Sharma Trading Co." (06/Haryana), base Rs 1000
+      -> IGST Rs 180 -> TOTAL Rs 1180
+      -> "One Thousand One Hundred Eighty Rupees Only"
+
+  INTRA-STATE (CGST+SGST):
+      Client "Bhopal Retail Pvt Ltd" (23/MP), base Rs 500
+      -> CGST Rs 45 + SGST Rs 45 -> TOTAL Rs 590
+      -> "Five Hundred Ninety Rupees Only"
+
+
+================================================================================
+APPENDIX B: QUICK FAQ FOR THE NEW AI
+================================================================================
+  Q: Where do I put the Delhivery logo?
+  A: Nowhere except the small 52x9pt icon beside "Routing Partner:
+     Delhivery" in the Service box.
+
+  Q: Client GSTIN missing?
+  A: Generate anyway but warn (Rule G6); state detection then falls back
+     to client_state string.
+
+  Q: Can total ever include product value or COD?
+  A: NEVER. Total is always base freight + GST only.
+
+  Q: User sends a Delhivery PDF?
+  A: pdf_parser.parse_delhivery_pdf() can pre-fill consignee/AWB/pincodes
+     — but client (billed-to) details and base charge come from the user,
+     and NOTHING from the PDF's product table is used.
+
+ — End of Master Instruction File —
+
+
+ARCHIVAL Policy (user instruction, standing)
+Every generated invoice PDF is AUTO-MOVED to `<client name>/<YYYY-MM MonthName>/`
+(e.g. `Shree Mahadev/2026-09 September/`) via `archive_invoice()`. The HTML copy
+is deleted; `generated/` stays empty (counter file only). The archive folder is
+git-ignored (private business records). Invoice filenames include the consignee
+name: `GST_invoice_<CUSTOMER>_<AWB>.pdf`.
+ADDENDUM — v3.1 (upar ke layout notes se conflict ho to ye manno)
+------------------------------------------------------------------
+  * Service & Shipment specs row ab 4 columns: Origin | Destination |
+    Weight | Payment Method (Prepaid/COD) — sirf method, COD amount
+    KABHI print nahi hota.
+  * Payment method Delhivery PDF / OCR se auto-scan hota hai.
+  * Desktop app: dashboard UI (navy sidebar + indigo) — pages:
+    Invoice, Bulk, History, Templates, Settings, Backup, Help.
+    Bug fixed: nayi file select karne par fields hamesha fresh
+    data se overwrite hote hain.
+  * Bulk mode: multi-page PDF (har page 1 invoice) → editable table
+    (Weight/Amount manual) → Generate ALL → sequential + archive.
+  * archive_invoice(): client-name folder HAMESHA (title-case,
+    "Shree Mahadev"), archive_root = base location; month subfolder
+    <YYYY-MM MonthName>; HTML delete, sirf PDF store.
+
+
+INVOICE NUMBERING — v3.2 (FINAL; purane MSE/<FY>/0001 ko supersede karta hai)
+----------------------------------------------------------------------------
+  Naya GST-compliant format (max 16 chars, sirf A-Z 0-9 - /):
+  MSE/<yymmdd><HH>-<seq>   jaise  MSE/26090814-101
+  * seq GLOBAL hai: 101 se start, kabhi reset/repeat NAHI hota
+    (generated/gst_invoice_counter.txt me "seq: N" ke roop me persist)
+  * timestamp = generation time (uniqueness ke liye)
+  * seq 999 ke baad hour drop (MSE/<yymmdd>-<seq>) — 16-char limit safe
+  * Purane FY-format counter lines safely ignore hote hain
